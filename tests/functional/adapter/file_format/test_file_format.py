@@ -212,6 +212,9 @@ sources:
           read_options:
             has_header: false
             truncate_ragged_lines: true
+            # Polars 2 refuses a schema wider than the first line without it.
+            # Older Polars has no such argument; FileFormat.read drops it there.
+            missing_columns: insert
             schema:
               c1: Int64
               c2: String
