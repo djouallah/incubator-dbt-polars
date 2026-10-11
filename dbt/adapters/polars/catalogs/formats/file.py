@@ -4,6 +4,7 @@ from pathlib import Path
 import polars as pl
 from dbt.adapters.polars.catalogs.baseCatalog import get_write_options
 from dbt.adapters.polars.catalogs.formats import FILE_FORMATS
+from dbt.adapters.polars.types import resolve_read_option_dtypes
 
 
 class FileFormat:
@@ -33,7 +34,8 @@ class FileFormat:
     ) -> pl.LazyFrame:
         spec = FILE_FORMATS[fmt]
         valid = frozenset(inspect.signature(spec.scan).parameters) - {"source", "path"}
-        kwargs = {k: v for k, v in read_options.items() if k in valid}
+        options = resolve_read_option_dtypes(read_options)
+        kwargs = {k: v for k, v in options.items() if k in valid}
         if storage_options is not None:
             kwargs["storage_options"] = storage_options
         return spec.scan(path, **kwargs)
