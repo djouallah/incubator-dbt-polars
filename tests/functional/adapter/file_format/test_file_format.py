@@ -200,6 +200,70 @@ class TestSourceReadOptions(PolarsTestMixin):
         assert rows == [(1, "hello"), (2, "world")]
 
 
+_RAGGED_SOURCE_SCHEMA = """
+version: 2
+sources:
+  - name: external_data
+    schema: "{{ target.schema }}"
+    tables:
+      - name: raw_ragged
+        config:
+          file_format: csv
+          read_options:
+            has_header: false
+            truncate_ragged_lines: true
+            schema:
+              c1: Int64
+              c2: String
+              c3: String
+"""
+
+_RAGGED_READER = """
+{{ config(materialized='table') }}
+SELECT * FROM {{ source('external_data', 'raw_ragged') }}
+"""
+
+
+@pytest.mark.require_profiles("local")
+@pytest.mark.require_configs("default")
+class TestSourceReadOptionsDtypeNames(PolarsTestMixin):
+    """A `schema` of dtype NAMES in read_options pads a ragged headerless CSV to its
+    widest row. YAML cannot carry a Polars dtype, only its name."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def write_raw_file(self, project):
+        relation = PolarsRelation.create(
+            database=project.database,
+            schema=project.test_schema,
+            identifier="raw_ragged",
+            type=RelationType.Table,
+            catalog=project.database,
+            file_format="csv",
+        )
+        with get_connection(project.adapter):
+            catalog = project.adapter.get_storage_catalog(project.database)
+            catalog.create_schema(relation)
+            path = catalog._get_path(relation)
+        # The first line is narrower than the second: a read that takes its width
+        # from the first line drops c3.
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("1,x\n2,y,z\n")
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "schema.yml": _RAGGED_SOURCE_SCHEMA,
+            "reader.sql": _RAGGED_READER,
+        }
+
+    def test_schema_of_dtype_names(self, project):
+        run_dbt(["run"])
+        rows = polars_read_relation(
+            project.adapter, "reader", ["c1", "c2", "c3"], order_by="c1"
+        )
+        assert rows == [(1, "x", None), (2, "y", "z")]
+
+
 _MERGE_CSV_MODEL = """
 {{ config(
     materialized='incremental',

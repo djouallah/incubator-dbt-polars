@@ -5,6 +5,7 @@
 ### Fixes
 
 - A file source whose identifier already ends in its format's extension, in any case (`data.CSV`, `*.CSV`), reads that file instead of `data.CSV.csv` ([#29](https://github.com/datamindedbe/incubator-dbt-polars/issues/29))
+- A source's `read_options` can name dtypes (`schema: {a: Int64, b: String}`); YAML cannot carry a Polars dtype, so `schema`, `schema_overrides` and `dtypes` failed with "'str' is not a Polars data type"
 
 ## v0.3.1
 
