@@ -586,8 +586,14 @@ class PolarsAdapter(BaseAdapter):
         if isinstance(catalog, StorageCatalog):
             for file_format in ("delta", *FILE_FORMATS):
                 candidate = create(file_format)
-                if catalog.table_exists(candidate):
-                    return candidate
+                # A catalog may raise rather than answer False for a path that is not
+                # there; either way it is not this format. Callers expect the
+                # DbtRuntimeError below for a relation that does not exist.
+                try:
+                    if catalog.table_exists(candidate):
+                        return candidate
+                except Exception:  # noqa: BLE001
+                    continue
             raise DbtRuntimeError(
                 f"Could not find relation '{database}.{schema}.{identifier}' "
                 "in any format, and no config is registered for it."
