@@ -558,13 +558,6 @@ class PolarsAdapter(BaseAdapter):
             identifier=identifier,
             type=RelationType.Table,
             catalog=database,
-        )
-        return PolarsRelation.create(
-            database=database,
-            schema=schema,
-            identifier=identifier,
-            type=RelationType.Table,
-            catalog=database,
             file_format=source_info["file_format"],
             read_options=source_info["read_options"],
         )
