@@ -466,10 +466,20 @@ class PolarsAdapter(BaseAdapter):
             )
         source_info = self._source_configs.get((database, schema, identifier))
         if source_info is None:
-            raise DbtRuntimeError(
-                "Could not find config for relation "
-                + f"'{database}.{schema}.{identifier}'. "
-                + "This is likely a bug in the dbt-polars adapter."
+            # `dbt run-operation` never populates the adapter cache, so a ref() to
+            # a model it did not build has no registered config. Read it in its
+            # catalog's default format: an Iceberg catalog has only one, and a
+            # storage catalog writes delta unless told otherwise.
+            logger.debug(
+                f"No config registered for '{database}.{schema}.{identifier}'; "
+                "reading it in the catalog's default format"
+            )
+            return PolarsRelation.create(
+                database=database,
+                schema=schema,
+                identifier=identifier,
+                type=RelationType.Table,
+                catalog=database,
             )
         return PolarsRelation.create(
             database=database,
