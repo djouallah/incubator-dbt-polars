@@ -26,7 +26,12 @@ from dbt_common.clients.agate_helper import (
 from dbt_common.exceptions import CompilationError, DbtRuntimeError
 
 import polars as pl
-from dbt.adapters.polars.catalogs import BaseCatalog, create_catalog
+from dbt.adapters.polars.catalogs import (
+    FILE_FORMATS,
+    BaseCatalog,
+    StorageCatalog,
+    create_catalog,
+)
 from dbt.adapters.polars.connections import PolarsConnectionManager, PolarsCredentials
 from dbt.adapters.polars.relation import PolarsRelation
 from dbt.adapters.polars.sql_rewrite import parse_and_rewrite
@@ -538,11 +543,15 @@ class PolarsAdapter(BaseAdapter):
             )
         source_info = self._source_configs.get((database, schema, identifier))
         if source_info is None:
-            raise DbtRuntimeError(
-                "Could not find config for relation "
-                + f"'{database}.{schema}.{identifier}'. "
-                + "This is likely a bug in the dbt-polars adapter."
+            # `dbt run-operation` never populates the adapter cache, so a ref() to
+            # a model it did not build has no registered config. Find the format
+            # it was written in: an Iceberg catalog has only one, a storage catalog
+            # holds delta or one of the file formats under the same name.
+            logger.debug(
+                f"No config registered for '{database}.{schema}.{identifier}'; "
+                "looking it up in its catalog"
             )
+            return self._find_unregistered_relation(database, schema, identifier)
         return PolarsRelation.create(
             database=database,
             schema=schema,
@@ -552,6 +561,37 @@ class PolarsAdapter(BaseAdapter):
             file_format=source_info["file_format"],
             read_options=source_info["read_options"],
         )
+
+    def _find_unregistered_relation(
+        self, database: str, schema: str, identifier: str
+    ) -> PolarsRelation:
+        def create(file_format: str | None) -> PolarsRelation:
+            return PolarsRelation.create(
+                database=database,
+                schema=schema,
+                identifier=identifier,
+                type=RelationType.Table,
+                catalog=database,
+                file_format=file_format,
+            )
+
+        catalog = self.get_storage_catalog(database)
+        if isinstance(catalog, StorageCatalog):
+            for file_format in ("delta", *FILE_FORMATS):
+                candidate = create(file_format)
+                # A catalog may raise rather than answer False for a path that is not
+                # there; either way it is not this format. Callers expect the
+                # DbtRuntimeError below for a relation that does not exist.
+                try:
+                    if catalog.table_exists(candidate):
+                        return candidate
+                except Exception:  # noqa: BLE001
+                    continue
+            raise DbtRuntimeError(
+                f"Could not find relation '{database}.{schema}.{identifier}' "
+                "in any format, and no config is registered for it."
+            )
+        return create(None)
 
     def _build_sql_context(
         self,

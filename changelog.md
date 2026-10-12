@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- `dbt run-operation` can read a `ref()`: it never populates the adapter cache, so a model it did not build failed with "Could not find config for relation". An unregistered relation is now looked up in its catalog: an Iceberg table as is, a storage catalog by the format it exists in
+
 ## v0.3.1
 
 ### Implements
