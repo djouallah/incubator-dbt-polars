@@ -26,86 +26,19 @@ from dbt_common.clients.agate_helper import (
 from dbt_common.exceptions import CompilationError, DbtRuntimeError
 
 import polars as pl
-from dbt.adapters.polars.catalogs import BaseCatalog, create_catalog
+from dbt.adapters.polars.catalogs import (
+    FILE_FORMATS,
+    BaseCatalog,
+    StorageCatalog,
+    create_catalog,
+)
 from dbt.adapters.polars.connections import PolarsConnectionManager, PolarsCredentials
 from dbt.adapters.polars.relation import PolarsRelation
 from dbt.adapters.polars.sql_rewrite import parse_and_rewrite
+from dbt.adapters.polars.types import resolve_polars_type as _resolve_polars_type
 
 if TYPE_CHECKING:
     import agate
-
-_POLARS_TYPE_MAP: dict[str, type[pl.DataType]] = {
-    # Polars-native names
-    "Int8": pl.Int8,
-    "Int16": pl.Int16,
-    "Int32": pl.Int32,
-    "Int64": pl.Int64,
-    "UInt8": pl.UInt8,
-    "UInt16": pl.UInt16,
-    "UInt32": pl.UInt32,
-    "UInt64": pl.UInt64,
-    "Float32": pl.Float32,
-    "Float64": pl.Float64,
-    "Boolean": pl.Boolean,
-    "Utf8": pl.Utf8,
-    "String": pl.Utf8,
-    "Categorical": pl.Categorical,
-    "Date": pl.Date,
-    "Datetime": pl.Datetime,
-    "Time": pl.Time,
-    "Duration": pl.Duration,
-    "Decimal": pl.Decimal,
-    "Binary": pl.Binary,
-    # SQL aliases (lowercase)
-    "int8": pl.Int8,
-    "int16": pl.Int16,
-    "int32": pl.Int32,
-    "int64": pl.Int64,
-    "tinyint": pl.Int8,
-    "smallint": pl.Int16,
-    "integer": pl.Int32,
-    "int": pl.Int32,
-    "int4": pl.Int32,
-    "int2": pl.Int16,
-    "bigint": pl.Int64,
-    "uint8": pl.UInt8,
-    "uint16": pl.UInt16,
-    "uint32": pl.UInt32,
-    "uint64": pl.UInt64,
-    "float4": pl.Float32,
-    "real": pl.Float32,
-    "float32": pl.Float32,
-    "float8": pl.Float64,
-    "double": pl.Float64,
-    "float64": pl.Float64,
-    "float": pl.Float64,
-    "double precision": pl.Float64,
-    "varchar": pl.Utf8,
-    "text": pl.Utf8,
-    "string": pl.Utf8,
-    "char": pl.Utf8,
-    "character varying": pl.Utf8,
-    "utf8": pl.Utf8,
-    "categorical": pl.Categorical,
-    "boolean": pl.Boolean,
-    "bool": pl.Boolean,
-    "date": pl.Date,
-    "timestamp": pl.Datetime,
-    "datetime": pl.Datetime,
-    "time": pl.Time,
-    "duration": pl.Duration,
-    "decimal": pl.Decimal,
-    "numeric": pl.Decimal,
-    "binary": pl.Binary,
-}
-
-
-def _resolve_polars_type(type_str: str) -> type[pl.DataType]:
-    key = type_str.split("(")[0].strip()
-    dtype = _POLARS_TYPE_MAP.get(key) or _POLARS_TYPE_MAP.get(key.lower())
-    if dtype is None:
-        raise DbtRuntimeError(f"Unknown column type: '{type_str}'")
-    return dtype
 
 
 def _normalize_partition_by(partition_by: str | list[str] | None) -> list[str]:
@@ -538,11 +471,15 @@ class PolarsAdapter(BaseAdapter):
             )
         source_info = self._source_configs.get((database, schema, identifier))
         if source_info is None:
-            raise DbtRuntimeError(
-                "Could not find config for relation "
-                + f"'{database}.{schema}.{identifier}'. "
-                + "This is likely a bug in the dbt-polars adapter."
+            # `dbt run-operation` never populates the adapter cache, so a ref() to
+            # a model it did not build has no registered config. Find the format
+            # it was written in: an Iceberg catalog has only one, a storage catalog
+            # holds delta or one of the file formats under the same name.
+            logger.debug(
+                f"No config registered for '{database}.{schema}.{identifier}'; "
+                "looking it up in its catalog"
             )
+            return self._find_unregistered_relation(database, schema, identifier)
         return PolarsRelation.create(
             database=database,
             schema=schema,
@@ -552,6 +489,37 @@ class PolarsAdapter(BaseAdapter):
             file_format=source_info["file_format"],
             read_options=source_info["read_options"],
         )
+
+    def _find_unregistered_relation(
+        self, database: str, schema: str, identifier: str
+    ) -> PolarsRelation:
+        def create(file_format: str | None) -> PolarsRelation:
+            return PolarsRelation.create(
+                database=database,
+                schema=schema,
+                identifier=identifier,
+                type=RelationType.Table,
+                catalog=database,
+                file_format=file_format,
+            )
+
+        catalog = self.get_storage_catalog(database)
+        if isinstance(catalog, StorageCatalog):
+            for file_format in ("delta", *FILE_FORMATS):
+                candidate = create(file_format)
+                # A catalog may raise rather than answer False for a path that is not
+                # there; either way it is not this format. Callers expect the
+                # DbtRuntimeError below for a relation that does not exist.
+                try:
+                    if catalog.table_exists(candidate):
+                        return candidate
+                except Exception:  # noqa: BLE001
+                    continue
+            raise DbtRuntimeError(
+                f"Could not find relation '{database}.{schema}.{identifier}' "
+                "in any format, and no config is registered for it."
+            )
+        return create(None)
 
     def _build_sql_context(
         self,
